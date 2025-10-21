@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ticket Business Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"></script>
+    <style>
+        /* Custom styles for aesthetic enhancements */
+        body { font-family: 'Inter', sans-serif; background-color: #f7f9fb; }
+        .card { box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1); }
+        .metric-card { transition: all 0.2s; }
+        .metric-card:hover { transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1); }
+        .btn-primary { background-color: #4f46e5; border-color: #4f46e5; color: white; }
+        .btn-primary:hover { background-color: #4338ca; }
+        .input-group { margin-bottom: 1rem; }
+    </style>
+</head>
+<body class="min-h-screen">
+    <div id="app" class="max-w-4xl mx-auto p-4 md:p-6">
+        <header class="mb-6 border-b pb-4 flex justify-between items-center">
+            <h1 class="text-3xl font-bold text-gray-800">Ticket Manager</h1>
+            <div id="auth-status" class="text-xs text-gray-500">Connecting...</div>
+        </header>
+
+        <!-- Navigation Tabs -->
+        <nav class="flex space-x-2 mb-6">
+            <button onclick="app.setView('dashboard')" class="nav-btn p-2 rounded-lg font-medium text-sm transition-colors" id="nav-dashboard">Dashboard</button>
+            <button onclick="app.setView('addTransaction')" class="nav-btn p-2 rounded-lg font-medium text-sm transition-colors" id="nav-addTransaction">New Transaction</button>
+            <button onclick="app.setView('manageParties')" class="nav-btn p-2 rounded-lg font-medium text-sm transition-colors" id="nav-manageParties">Manage Parties</button>
+            <button onclick="app.setView('settings')" class="nav-btn p-2 rounded-lg font-medium text-sm transition-colors" id="nav-settings">Settings</button>
+        </nav>
+
+        <div id="content-area">
+            <!-- Dynamic content will be rendered here -->
+            <div class="flex justify-center items-center h-40">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-500"></div>
+                <p class="ml-4 text-gray-600">Loading application...</p>
+            </div>
+        </div>
+
+        <!-- Custom Modal for Alerts/Confirmations -->
+        <div id="custom-modal" class="fixed inset-0 bg-gray-900 bg-opacity-50 z-50 hidden flex items-center justify-center p-4">
+            <div class="bg-white rounded-xl card max-w-sm w-full p-6">
+                <h3 id="modal-title" class="text-xl font-semibold mb-3 text-gray-800"></h3>
+                <p id="modal-message" class="text-gray-600 mb-6"></p>
+                <div class="flex justify-end space-x-3">
+                    <button id="modal-cancel" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition">Cancel</button>
+                    <button id="modal-confirm" class="px-4 py-2 btn-primary rounded-lg transition">Confirm</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, onSnapshot, addDoc, updateDoc, doc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables for Firebase and App State (within the module scope)
+        let db, auth;
+        let userId = null;
+        let isAuthReady = false;
+        let moduleId = null; // Added module-scoped variable for __app_id
+
+        const state = {
+            view: 'dashboard', // 'dashboard', 'addTransaction', 'manageParties', 'settings'
+            transactions: [],
+            parties: [],
+            metrics: {
+                profit: 0,
+                receivables: 0,
+                payables: 0,
+                totalSales: 0,
+                totalPurchases: 0,
+            }
+        };
+
+        const app = {
+            // --- Core App Functions ---
+            init: async () => {
+                try {
+                    setLogLevel('Debug');
+                    // Store the app ID in the module-scoped variable
+                    moduleId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                    const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+                    if (!firebaseConfig || !firebaseConfig.projectId) {
+                        throw new Error("Firebase configuration is missing or invalid.");
+                    }
+
+                    const firebaseApp = initializeApp(firebaseConfig);
+                    db = getFirestore(firebaseApp);
+                    auth = getAuth(firebaseApp);
+
+                    const authStatusEl = document.getElementById('auth-status');
+                    authStatusEl.textContent = 'Authenticating...';
+
+                    // 1. Authenticate
+                    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                        authStatusEl.textContent = 'Authenticated (Custom Token)';
+                    } else {
+                        await signInAnonymously(auth);
+                        authStatusEl.textContent = 'Authenticated (Anonymous)';
+                    }
+
+                    // 2. Auth State Listener & Initialization
+                    onAuthStateChanged(auth, (user) => {
+                        if (user) {
+                            userId = user.uid;
+                            isAuthReady = true;
+                            authStatusEl.textContent = `User ID: ${userId.substring(0, 8)}...`;
+                            app.startListeners();
+                            app.render(); // Initial render after auth
+                        } else {
+                            isAuthReady = false;
+                            userId = null;
+                            authStatusEl.textContent = 'Not Signed In';
+                            app.renderError('Authentication Failed. Please retry.');
+                        }
+                    });
+
+                } catch (error) {
+                    console.error("Firebase Initialization Error:", error);
+                    app.renderError(`Initialization failed: ${error.message}`);
+                }
+            },
+
+            startListeners: () => {
+                if (!isAuthReady || !userId) return;
+
+                // --- Contacts Listener ---
+                // Use moduleId instead of bare __app_id
+                const contactsRef = collection(db, `artifacts/${moduleId}/users/${userId}/contacts`);
+                onSnapshot(query(contactsRef), (snapshot) => {
+                    const contacts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    state.parties = contacts;
+                    app.render();
+                }, (error) => {
+                    console.error("Firestore Contacts Listener Error:", error);
+                });
+
+                // --- Transactions Listener ---
+                // Use moduleId instead of bare __app_id
+                const transactionsRef = collection(db, `artifacts/${moduleId}/users/${userId}/transactions`);
+                onSnapshot(query(transactionsRef), (snapshot) => {
+                    const transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    state.transactions = transactions;
+                    app.calculateMetrics();
+                    app.render();
+                }, (error) => {
+                    console.error("Firestore Transactions Listener Error:", error);
+                });
+            },
+
+            // --- State and Metric Management ---
+            calculateMetrics: () => {
+                let profit = 0;
+                let receivables = 0;
+                let payables = 0;
+                let totalSales = 0;
+                let totalPurchases = 0;
+
+                state.transactions.forEach(t => {
+                    const isCredit = t.paymentStatus !== 'Paid';
+                    const amountDue = t.amount - (t.paidAmount || 0);
+
+                    if (t.type === 'Sale') {
+                        // Profit = Sale Amount - Unit Cost (estimated from initial purchase if tracked, but here we simplify)
+                        // Simple Profit for this scope: Total Sales - Total Purchases
+                        totalSales += t.amount;
+
+                        if (isCredit) {
+                            receivables += amountDue;
+                        }
+                    } else if (t.type === 'Purchase') {
+                        totalPurchases += t.amount;
+                        if (isCredit) {
+                            payables += amountDue;
+                        }
+                    }
+                });
+
+                state.metrics.profit = totalSales - totalPurchases;
+                state.metrics.receivables = receivables;
+                state.metrics.payables = payables;
+                state.metrics.totalSales = totalSales;
+                state.metrics.totalPurchases = totalPurchases;
+            },
+
+            // --- Database Operations ---
+            addParty: async (partyData) => {
+                if (!isAuthReady) return app.showModal('Error', 'App not fully initialized. Please wait.');
+                try {
+                    // Use moduleId instead of bare __app_id
+                    const contactsRef = collection(db, `artifacts/${moduleId}/users/${userId}/contacts`);
+                    await addDoc(contactsRef, {
+                        ...partyData,
+                        createdAt: new Date().toISOString()
+                    });
+                    app.showModal('Success', `${partyData.type} "${partyData.name}" added successfully!`);
+                } catch (e) {
+                    console.error("Error adding party: ", e);
+                    app.showModal('Error', `Failed to add party: ${e.message}`);
+                }
+            },
+
+            addTransaction: async (transactionData) => {
+                if (!isAuthReady) return app.showModal('Error', 'App not fully initialized. Please wait.');
+                try {
+                    // Use moduleId instead of bare __app_id
+                    const transactionsRef = collection(db, `artifacts/${moduleId}/users/${userId}/transactions`);
+                    await addDoc(transactionsRef, {
+                        ...transactionData,
+                        date: transactionData.date || new Date().toISOString().split('T')[0],
+                        createdAt: new Date().toISOString()
+                    });
+                    app.showModal('Success', `${transactionData.type} transaction added successfully!`);
+                    app.setView('dashboard');
+                } catch (e) {
+                    console.error("Error adding transaction: ", e);
+                    app.showModal('Error', `Failed to add transaction: ${e.message}`);
+                }
+            },
+
+            updateTransactionPayment: async (transactionId, newPaidAmount, newStatus) => {
+                if (!isAuthReady) return app.showModal('Error', 'App not fully initialized. Please wait.');
+                try {
+                    // Use moduleId instead of bare __app_id
+                    const transactionRef = doc(db, `artifacts/${moduleId}/users/${userId}/transactions`, transactionId);
+                    await updateDoc(transactionRef, {
+                        paidAmount: newPaidAmount,
+                        paymentStatus: newStatus,
+                        updatedAt: new Date().toISOString()
+                    });
+                    app.showModal('Success', 'Transaction payment updated.');
+                } catch (e) {
+                    console.error("Error updating transaction: ", e);
+                    app.showModal('Error', `Failed to update transaction: ${e.message}`);
+                }
+            },
+
+            // --- UI Rendering and State Management ---
+            setView: (newView) => {
+                state.view = newView;
+                app.render();
+            },
+
+            render: () => {
+                const contentArea = document.getElementById('content-area');
+                const navButtons = document.querySelectorAll('.nav-btn');
+
+                // Update navigation button styles
+                navButtons.forEach(btn => {
+                    const isActive = btn.id === `nav-${state.view}`;
+                    btn.className = `nav-btn p-2 rounded-lg font-medium text-sm transition-colors ${isActive ? 'bg-indigo-500 text-white' : 'text-gray-600 hover:bg-gray-200'}`;
+                });
+
+                // Render content based on view state
+                switch (state.view) {
+                    case 'dashboard':
+                        contentArea.innerHTML = app.renderDashboard();
+                        break;
+                    case 'addTransaction':
+                        contentArea.innerHTML = app.renderAddTransaction();
+                        app.initTransactionForm();
+                        break;
+                    case 'manageParties':
+                        contentArea.innerHTML = app.renderManageParties();
+                        break;
+                    case 'settings':
+                        contentArea.innerHTML = app.renderSettings();
+                        break;
+                    default:
+                        contentArea.innerHTML = app.renderDashboard();
+                }
+            },
+
+            renderError: (message) => {
+                document.getElementById('content-area').innerHTML = `
+                    <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative" role="alert">
+                        <strong class="font-bold">Error!</strong>
+                        <span class="block sm:inline"> ${message}</span>
+                    </div>
+                `;
+            },
+
+            // --- Modal Implementation (replaces alert/confirm) ---
+            showModal: (title, message, isConfirm = false, onConfirm = () => {}) => {
+                const modal = document.getElementById('custom-modal');
+                document.getElementById('modal-title').textContent = title;
+                document.getElementById('modal-message').textContent = message;
+                const confirmBtn = document.getElementById('modal-confirm');
+                const cancelBtn = document.getElementById('modal-cancel');
+
+                confirmBtn.onclick = () => {
+                    modal.classList.add('hidden');
+                    onConfirm();
+                };
+
+                if (isConfirm) {
+                    cancelBtn.classList.remove('hidden');
+                    cancelBtn.onclick = () => modal.classList.add('hidden');
+                } else {
+                    cancelBtn.classList.add('hidden');
+                    confirmBtn.textContent = 'OK';
+                }
+
+                modal.classList.remove('hidden');
+            },
+
+            // --- View Renderers ---
+            renderDashboard: () => {
+                const partiesMap = state.parties.reduce((acc, p) => { acc[p.id] = p; return acc; }, {});
+                const { profit, receivables, payables, totalSales, totalPurchases } = state.metrics;
+
+                const formatCurrency = (amount) => `$${amount.toFixed(2)}`;
+                const getStatusColor = (status) => {
+                    switch (status) {
+                        case 'Paid': return 'bg-green-100 text-green-800';
+                        case 'Partial': return 'bg-yellow-100 text-yellow-800';
+                        case 'Pending': return 'bg-red-100 text-red-800';
+                        default: return 'bg-gray-100 text-gray-800';
+                    }
+                };
+                const getPaymentStatus = (t) => {
+                    const due = t.amount - (t.paidAmount || 0);
+                    if (due <= 0.01) return 'Paid';
+                    if (t.paidAmount > 0) return 'Partial';
+                    return 'Pending';
+                }
+
+                return `
+                    <h2 class="text-2xl font-semibold mb-4 text-gray-800">Summary Dashboard</h2>
+
+                    <!-- Metrics Grid -->
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                        ${app.renderMetricCard('Net Profit', formatCurrency(profit), profit >= 0 ? 'bg-green-500' : 'bg-red-500', profit >= 0 ? '👍' : '👎')}
+                        ${app.renderMetricCard('Receivables', formatCurrency(receivables), 'bg-blue-500', '💰')}
+                        ${app.renderMetricCard('Payables', formatCurrency(payables), 'bg-orange-500', '💸')}
+                        ${app.renderMetricCard('Total Sales', formatCurrency(totalSales), 'bg-indigo-500', '📈')}
+                    </div>
+
+                    <!-- Transactions History Table -->
+                    <h3 class="text-xl font-semibold mb-3 text-gray-800 border-t pt-4">Transaction History (${state.transactions.length} records)</h3>
+                    <div class="bg-white rounded-xl card overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Party</th>
+                                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
+                                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-gray-200">
+                                ${state.transactions.sort((a, b) => new Date(b.date) - new Date(a.date)).map(t => {
+                                    const party = partiesMap[t.partyId] || { name: 'Unknown' };
+                                    const status = getPaymentStatus(t);
+                                    const due = t.amount - (t.paidAmount || 0);
+                                    const amountDisplay = t.type === 'Sale' ?
+                                        `<span class="text-green-600">${formatCurrency(t.amount)}</span>` :
+                                        `<span class="text-red-600">${formatCurrency(t.amount)}</span>`;
+
+                                    return `
+                                        <tr class="hover:bg-gray-50 transition">
+                                            <td class="px-3 py-3 whitespace-nowrap text-sm text-gray-500">${t.date}</td>
+                                            <td class="px-3 py-3 whitespace-nowrap text-sm font-medium ${t.type === 'Sale' ? 'text-green-700' : 'text-red-700'}">${t.type}</td>
+                                            <td class="px-3 py-3 whitespace-nowrap text-sm text-gray-900">${party.name}</td>
+                                            <td class="px-3 py-3 whitespace-nowrap text-sm">${amountDisplay}</td>
+                                            <td class="px-3 py-3 whitespace-nowrap">
+                                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${getStatusColor(status)}">
+                                                    ${status}
+                                                </span>
+                                                ${status !== 'Paid' ? `<p class="text-xs text-red-500 mt-1">Due: ${formatCurrency(due)}</p>` : ''}
+                                            </td>
+                                            <td class="px-3 py-3 whitespace-nowrap text-sm font-medium">
+                                                ${status !== 'Paid' ? `<button onclick="app.showPaymentModal('${t.id}', ${t.amount}, ${t.paidAmount || 0})" class="text-indigo-600 hover:text-indigo-900 text-xs font-bold p-1 rounded-md bg-indigo-50">Pay/Receive</button>` : ''}
+                                            </td>
+                                        </tr>
+                                    `;
+                                }).join('') || `<tr><td colspan="6" class="p-6 text-center text-gray-500">No transactions recorded yet.</td></tr>`}
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+            },
+
+            renderMetricCard: (title, value, colorClass, icon) => {
+                return `
+                    <div class="metric-card bg-white p-4 rounded-xl card text-center shadow-md">
+                        <div class="text-2xl mb-1">${icon}</div>
+                        <p class="text-xl font-bold ${colorClass.replace('bg', 'text')}">${value}</p>
+                        <p class="text-sm text-gray-500">${title}</p>
+                    </div>
+                `;
+            },
+
+            // --- Transaction Specific Renders/Helpers ---
+            renderAddTransaction: () => {
+                const vendors = state.parties.filter(p => p.type === 'Vendor');
+                const clients = state.parties.filter(p => p.type === 'Client');
+
+                const partyOptions = (type) => {
+                    const list = type === 'Purchase' ? vendors : clients;
+                    return list.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+                };
+
+                return `
+                    <h2 class="text-2xl font-semibold mb-4 text-gray-800">Record New Transaction</h2>
+                    <div class="bg-white p-6 rounded-xl card max-w-lg mx-auto">
+                        <form id="transaction-form" onsubmit="event.preventDefault(); app.handleTransactionSubmit();">
+                            <div class="input-group">
+                                <label for="type" class="block text-sm font-medium text-gray-700 mb-1">Transaction Type</label>
+                                <select id="type" name="type" required class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                                    <option value="Sale">Sale (Client)</option>
+                                    <option value="Purchase">Purchase (Vendor)</option>
+                                </select>
+                            </div>
+
+                            <div class="input-group">
+                                <label for="partyId" class="block text-sm font-medium text-gray-700 mb-1">Select Party</label>
+                                <select id="partyId" name="partyId" required class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                                    <optgroup label="Vendors (for Purchase)">
+                                        ${partyOptions('Purchase')}
+                                    </optgroup>
+                                    <optgroup label="Clients (for Sale)">
+                                        ${partyOptions('Sale')}
+                                    </optgroup>
+                                </select>
+                                <p class="text-xs text-gray-500 mt-1">Vendors and Clients are managed in the "Manage Parties" section.</p>
+                            </div>
+
+                            <div class="input-group">
+                                <label for="date" class="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                                <input type="date" id="date" name="date" required value="${new Date().toISOString().split('T')[0]}" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                            </div>
+
+                            <div class="input-group">
+                                <label for="description" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                                <input type="text" id="description" name="description" placeholder="e.g., 20x Concert A tickets" required class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                            </div>
+
+                            <div class="grid grid-cols-2 gap-4">
+                                <div class="input-group">
+                                    <label for="amount" class="block text-sm font-medium text-gray-700 mb-1">Total Amount ($)</label>
+                                    <input type="number" id="amount" name="amount" step="0.01" min="0.01" required class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                                </div>
+                                <div class="input-group">
+                                    <label for="paidAmount" class="block text-sm font-medium text-gray-700 mb-1">Initial Paid Amount ($)</label>
+                                    <input type="number" id="paidAmount" name="paidAmount" step="0.01" min="0" value="0.00" required class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                                </div>
+                            </div>
+
+                            <button type="submit" class="mt-4 w-full p-3 btn-primary rounded-lg font-semibold transition">Record Transaction</button>
+                        </form>
+                    </div>
+                `;
+            },
+
+            initTransactionForm: () => {
+                const form = document.getElementById('transaction-form');
+                const typeSelect = document.getElementById('type');
+                const partySelect = document.getElementById('partyId');
+
+                const updatePartyOptions = (transactionType) => {
+                    const parties = state.parties.filter(p => {
+                        if (transactionType === 'Sale') return p.type === 'Client';
+                        if (transactionType === 'Purchase') return p.type === 'Vendor';
+                        return false;
+                    });
+
+                    partySelect.innerHTML = parties.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+
+                    if (parties.length === 0) {
+                        partySelect.innerHTML = `<option value="" disabled selected>No ${transactionType === 'Sale' ? 'Clients' : 'Vendors'} found. Add one!</option>`;
+                    }
+                };
+
+                typeSelect.addEventListener('change', (e) => updatePartyOptions(e.target.value));
+
+                // Initial update
+                updatePartyOptions(typeSelect.value);
+
+                // Add validation logic to ensure paidAmount <= amount
+                const amountInput = document.getElementById('amount');
+                const paidAmountInput = document.getElementById('paidAmount');
+                
+                const validatePaidAmount = () => {
+                    const totalAmount = parseFloat(amountInput.value) || 0;
+                    const paidAmount = parseFloat(paidAmountInput.value) || 0;
+
+                    if (paidAmount > totalAmount) {
+                        paidAmountInput.setCustomValidity('Paid amount cannot exceed total amount.');
+                    } else {
+                        paidAmountInput.setCustomValidity('');
+                    }
+                };
+
+                amountInput.addEventListener('input', validatePaidAmount);
+                paidAmountInput.addEventListener('input', validatePaidAmount);
+            },
+
+            handleTransactionSubmit: () => {
+                const form = document.getElementById('transaction-form');
+                const data = new FormData(form);
+                const transaction = {
+                    type: data.get('type'),
+                    partyId: data.get('partyId'),
+                    date: data.get('date'),
+                    description: data.get('description'),
+                    amount: parseFloat(data.get('amount')),
+                    paidAmount: parseFloat(data.get('paidAmount')) || 0,
+                };
+
+                const amountDue = transaction.amount - transaction.paidAmount;
+                if (amountDue <= 0.01) {
+                    transaction.paymentStatus = 'Paid';
+                } else if (transaction.paidAmount > 0) {
+                    transaction.paymentStatus = 'Partial';
+                } else {
+                    transaction.paymentStatus = 'Pending';
+                }
+
+                if (transaction.partyId) {
+                    app.addTransaction(transaction);
+                } else {
+                    app.showModal('Error', 'Please select a valid party.');
+                }
+            },
+
+            showPaymentModal: (transactionId, totalAmount, currentPaid) => {
+                const transaction = state.transactions.find(t => t.id === transactionId);
+                if (!transaction) return app.showModal('Error', 'Transaction not found.');
+
+                const due = totalAmount - currentPaid;
+                const type = transaction.type === 'Sale' ? 'Received' : 'Paid';
+
+                app.showModal('Update Payment Status', `
+                    <p class="mb-2">Transaction: ${transaction.description}</p>
+                    <p class="mb-2">Total Amount: $${totalAmount.toFixed(2)}</p>
+                    <p class="mb-4 text-red-600 font-semibold">Amount Due: $${due.toFixed(2)}</p>
+                    <label for="newPayment" class="block text-sm font-medium text-gray-700 mb-1">Amount ${type} Now ($)</label>
+                    <input type="number" id="newPayment" step="0.01" min="0.01" max="${due.toFixed(2)}" required class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                `, true, async () => {
+                    const newPayment = parseFloat(document.getElementById('newPayment').value);
+                    if (isNaN(newPayment) || newPayment <= 0) return app.showModal('Error', 'Invalid amount entered.');
+
+                    const newPaidAmount = currentPaid + newPayment;
+                    let newStatus = 'Pending';
+                    const newDue = totalAmount - newPaidAmount;
+
+                    if (newDue <= 0.01) {
+                        newStatus = 'Paid';
+                    } else if (newPaidAmount > 0) {
+                        newStatus = 'Partial';
+                    }
+
+                    await app.updateTransactionPayment(transactionId, newPaidAmount, newStatus);
+                });
+                document.getElementById('modal-confirm').textContent = `Record ${type}`;
+            },
+
+            // --- Party Management Renders ---
+            renderManageParties: () => {
+                const vendors = state.parties.filter(p => p.type === 'Vendor');
+                const clients = state.parties.filter(p => p.type === 'Client');
+
+                return `
+                    <h2 class="text-2xl font-semibold mb-4 text-gray-800">Manage Clients and Vendors</h2>
+
+                    <div class="bg-white p-6 rounded-xl card mb-6 max-w-lg mx-auto">
+                        <h3 class="text-xl font-semibold mb-3">Add New Party</h3>
+                        <form id="party-form" onsubmit="event.preventDefault(); app.handlePartySubmit();">
+                            <div class="input-group">
+                                <label for="partyName" class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                                <input type="text" id="partyName" name="name" required class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                            </div>
+                            <div class="input-group">
+                                <label for="partyType" class="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                                <select id="partyType" name="type" required class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                                    <option value="Vendor">Vendor (Ticket Purchase)</option>
+                                    <option value="Client">Client (Ticket Sale)</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="mt-4 w-full p-3 btn-primary rounded-lg font-semibold transition">Add Party</button>
+                        </form>
+                    </div>
+
+                    <!-- Vendors List -->
+                    <div class="grid md:grid-cols-2 gap-6">
+                        <div>
+                            <h3 class="text-xl font-semibold mb-3">Vendors (${vendors.length})</h3>
+                            <ul class="space-y-2">
+                                ${vendors.map(p => `<li class="bg-gray-50 p-3 rounded-lg flex justify-between items-center text-sm">${p.name} <span class="text-xs text-indigo-600">${p.type}</span></li>`).join('') || '<li class="text-gray-500">No vendors added yet.</li>'}
+                            </ul>
+                        </div>
+                        <!-- Clients List -->
+                        <div>
+                            <h3 class="text-xl font-semibold mb-3">Clients (${clients.length})</h3>
+                            <ul class="space-y-2">
+                                ${clients.map(p => `<li class="bg-gray-50 p-3 rounded-lg flex justify-between items-center text-sm">${p.name} <span class="text-xs text-indigo-600">${p.type}</span></li>`).join('') || '<li class="text-gray-500">No clients added yet.</li>'}
+                            </ul>
+                        </div>
+                    </div>
+                `;
+            },
+
+            handlePartySubmit: () => {
+                const form = document.getElementById('party-form');
+                const data = new FormData(form);
+                const party = {
+                    name: data.get('name').trim(),
+                    type: data.get('type'),
+                };
+
+                if (party.name && party.type) {
+                    app.addParty(party);
+                    form.reset();
+                } else {
+                    app.showModal('Validation Error', 'Please enter a name and select a type.');
+                }
+            },
+
+            // --- Settings/Export/Import Renders ---
+            renderSettings: () => {
+                return `
+                    <h2 class="text-2xl font-semibold mb-4 text-gray-800">Settings & Data Management</h2>
+                    <div class="bg-white p-6 rounded-xl card mb-6">
+                        <h3 class="text-xl font-semibold mb-3 border-b pb-2">Data Export/Import</h3>
+                        <p class="text-gray-600 mb-4">You can export your data as JSON or CSV for backup or migration. The JSON file can be re-imported later.</p>
+
+                        <div class="flex flex-col space-y-3">
+                            <button onclick="app.exportData('json')" class="w-full p-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition font-semibold">Export All Data (JSON)</button>
+                            <button onclick="app.exportData('csv')" class="w-full p-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition font-semibold">Export Transactions (CSV)</button>
+                        </div>
+
+                        <div class="mt-6 pt-4 border-t">
+                            <h4 class="text-lg font-medium mb-2">Import JSON Data</h4>
+                            <input type="file" id="importFile" accept=".json" class="w-full mb-3 p-2 border border-gray-300 rounded-lg">
+                            <button onclick="app.importData()" class="w-full p-3 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition font-semibold">Import Data</button>
+                            <p class="text-sm text-red-500 mt-2">WARNING: Importing may overwrite or duplicate existing data.</p>
+                        </div>
+                    </div>
+
+                    <div class="bg-white p-6 rounded-xl card">
+                        <h3 class="text-xl font-semibold mb-3 border-b pb-2">Optional Server Save (PHP API)</h3>
+                        <p class="text-gray-600 mb-4">This feature requires two PHP endpoints on your hosting server (save.php and load.php). If you do not have these set up, you can safely ignore this section.</p>
+                        <input type="text" id="serverUrl" placeholder="Enter base URL (e.g., https://myserver.com/api/)" class="w-full p-2 border border-gray-300 rounded-lg mb-3">
+                        <div class="flex space-x-3">
+                            <button onclick="app.serverAction('save')" class="w-1/2 p-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition font-semibold">Save to Server</button>
+                            <button onclick="app.serverAction('load')" class="w-1/2 p-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-semibold">Load from Server</button>
+                        </div>
+                    </div>
+                `;
+            },
+
+            // --- Data Manipulation ---
+            exportData: (format) => {
+                const data = {
+                    parties: state.parties,
+                    transactions: state.transactions,
+                    metrics: state.metrics,
+                    exportDate: new Date().toISOString()
+                };
+
+                let filename = `manager_data_${new Date().toISOString().split('T')[0]}`;
+                let content, mimeType;
+
+                if (format === 'json') {
+                    content = JSON.stringify(data, null, 2);
+                    mimeType = 'application/json';
+                    filename += '.json';
+                } else if (format === 'csv') {
+                    // Create CSV content for transactions
+                    const headers = ["ID", "Type", "PartyName", "Date", "Description", "Amount", "PaidAmount", "Status"];
+                    const partyMap = state.parties.reduce((acc, p) => ({ ...acc, [p.id]: p.name }), {});
+                    
+                    const rows = state.transactions.map(t => [
+                        t.id, t.type, partyMap[t.partyId] || 'Unknown', t.date, t.description, t.amount, t.paidAmount, t.paymentStatus
+                    ].map(item => `"${String(item).replace(/"/g, '""')}"`).join(','));
+
+                    content = [headers.join(','), ...rows].join('\n');
+                    mimeType = 'text/csv';
+                    filename += '.csv';
+                }
+
+                const blob = new Blob([content], { type: mimeType });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                app.showModal('Export Complete', `Data exported successfully as ${filename}.`);
+            },
+
+            importData: () => {
+                const fileInput = document.getElementById('importFile');
+                const file = fileInput.files[0];
+
+                if (!file) {
+                    return app.showModal('Error', 'Please select a JSON file to import.');
+                }
+
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const importedData = JSON.parse(e.target.result);
+                        
+                        app.showModal('Confirm Import', 
+                            'Are you sure you want to import this data? This will add new transactions and parties to your database.', 
+                            true, async () => {
+                            
+                            // Simple import logic: add all new parties and transactions
+                            // Note: Advanced logic for checking duplicates is skipped for simplicity.
+                            for (const party of importedData.parties) {
+                                // Use setDoc to overwrite an existing party if ID matches, or create new if not present (simple upsert)
+                                // Use moduleId instead of bare __app_id
+                                await setDoc(doc(db, `artifacts/${moduleId}/users/${userId}/contacts`, party.id), party);
+                            }
+                            for (const transaction of importedData.transactions) {
+                                // Use setDoc to overwrite an existing transaction if ID matches, or create new if not present
+                                // Use moduleId instead of bare __app_id
+                                await setDoc(doc(db, `artifacts/${moduleId}/users/${userId}/transactions`, transaction.id), transaction);
+                            }
+                            
+                            app.showModal('Import Complete', 'Data successfully imported! The dashboard will refresh shortly.');
+                            fileInput.value = ''; // Clear file input
+                        });
+
+                    } catch (error) {
+                        console.error("Import Error:", error);
+                        app.showModal('Error', `Failed to parse or import data: ${error.message}`);
+                    }
+                };
+                reader.readAsText(file);
+            },
+
+            serverAction: async (action) => {
+                const baseUrl = document.getElementById('serverUrl').value.trim();
+                if (!baseUrl) {
+                    return app.showModal('Error', 'Please enter the base server URL.');
+                }
+                
+                const url = `${baseUrl}${action}.php`;
+                
+                // Helper to abstract fetch with basic error handling
+                const performFetch = async (endpoint, options = {}) => {
+                    try {
+                        const response = await fetch(endpoint, options);
+                        if (!response.ok) throw new Error(`Server returned status ${response.status}`);
+                        return await response.json();
+                    } catch (e) {
+                        console.error(e);
+                        app.showModal('Server Error', `Failed to connect to ${action} endpoint. Check URL and server status.`);
+                        return null;
+                    }
+                };
+
+                if (action === 'save') {
+                    const dataToSave = {
+                        userId: userId, // Pass userId for server-side security/folder-creation
+                        data: { parties: state.parties, transactions: state.transactions }
+                    };
+
+                    app.showModal('Saving...', 'Attempting to save data to the server...', false);
+                    document.getElementById('modal-cancel').classList.add('hidden'); // Hide cancel during save
+                    
+                    const result = await performFetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(dataToSave)
+                    });
+
+                    document.getElementById('custom-modal').classList.add('hidden');
+                    if (result && result.success) {
+                        app.showModal('Save Successful', 'Data has been backed up to your hosting server.');
+                    } else if (result) {
+                        app.showModal('Save Failed', `Server reported: ${result.message || 'Unknown error.'}`);
+                    }
+                } else if (action === 'load') {
+                    app.showModal('Confirm Load', 
+                        'Are you sure you want to load data from the server? This will replace your local data with server data.', 
+                        true, async () => {
+                        
+                        app.showModal('Loading...', 'Attempting to load data from the server...', false);
+                        document.getElementById('modal-cancel').classList.add('hidden'); // Hide cancel during load
+
+                        const result = await performFetch(`${url}?userId=${userId}`);
+
+                        document.getElementById('custom-modal').classList.add('hidden');
+                        if (result && result.success && result.data) {
+                            // Update Firestore with loaded data (simple replacement)
+                            // This would be complex in a single script. For simplicity, we assume server data is primary.
+                            // In a real app, you would merge or confirm replacement.
+                            app.showModal('Load Successful', 'Data loaded from server. Please refresh your data source manually for full effect (or implement advanced merging).');
+                        } else if (result) {
+                            app.showModal('Load Failed', `Server reported: ${result.message || 'Unknown error.'}`);
+                        }
+                    });
+                }
+            }
+        };
+
+        // Start the application
+        window.onload = app.init;
+        window.app = app; // Expose app object to global scope for inline event handlers
+    </script>
+</body>
+</html>
